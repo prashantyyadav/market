@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real-Time Options Screener</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Price flash animations */
+    @keyframes flashGreen {
+      0%   { color: #16a34a; transform: scale(1.06); }
+      100% { color: #e5e7eb; transform: scale(1); }
+    }
+    @keyframes flashRed {
+      0%   { color: #dc2626; transform: scale(1.06); }
+      100% { color: #e5e7eb; transform: scale(1); }
+    }
+    .flash-up   { animation: flashGreen 0.6s ease-out; }
+    .flash-down { animation: flashRed 0.6s ease-out; }
+
+    /* Blinking connection dot */
+    @keyframes pulse-dot { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+    .dot-live { animation: pulse-dot 1.2s infinite; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-200 min-h-screen font-sans">
+
+  <div class="max-w-5xl mx-auto p-4 md:p-6">
+
+    <!-- ================= HEADER ================= -->
+    <header class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+      <div class="flex items-center gap-4">
+        <div>
+          <div class="text-xs uppercase tracking-widest text-slate-400">Symbol</div>
+          <div id="symbolLabel" class="text-3xl font-bold text-white">CIPLA</div>
+        </div>
+        <div class="border-l border-slate-700 pl-4">
+          <div class="text-xs uppercase tracking-widest text-slate-400">Last Price</div>
+          <div id="priceLabel" class="text-3xl font-bold text-slate-200 tabular-nums">—</div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 text-sm">
+          <span id="statusDot" class="w-3 h-3 rounded-full bg-slate-500"></span>
+          <span id="statusText" class="text-slate-400">Disconnected</span>
+        </div>
+        <button id="connectBtn"
+          class="bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 transition
+                 text-white font-semibold px-4 py-2 rounded-lg shadow">
+          Connect to Upstox Bridge
+        </button>
+      </div>
+    </header>
+
+    <!-- ================= CONTROLS ================= -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+      <div class="bg-slate-800 rounded-lg p-3">
+        <label class="block text-xs uppercase tracking-wide text-slate-400 mb-1">Change Underlying</label>
+        <div class="flex gap-2">
+          <input id="symbolInput" type="text" placeholder="e.g. NIFTY"
+            class="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2
+                   text-sm uppercase focus:outline-none focus:border-indigo-500" />
+          <button id="searchBtn"
+            class="bg-slate-700 hover:bg-slate-600 transition px-3 py-2 rounded text-sm font-medium">
+            Go
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-slate-800 rounded-lg p-3">
+        <label class="block text-xs uppercase tracking-wide text-slate-400 mb-1">Add Custom Strike</label>
+        <div class="flex gap-2">
+          <input id="strikeInput" type="number" step="1" placeholder="e.g. 1500"
+            class="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2
+                   text-sm focus:outline-none focus:border-indigo-500" />
+          <button id="addStrikeBtn"
+            class="bg-emerald-700 hover:bg-emerald-600 transition px-3 py-2 rounded text-sm font-medium">
+            Add
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-slate-800 rounded-lg p-3 flex items-end">
+        <button id="resetBtn"
+          class="w-full bg-rose-700 hover:bg-rose-600 transition px-3 py-2 rounded text-sm font-medium">
+          Reset Strikes
+        </button>
+      </div>
+    </section>
+
+    <!-- ================= OPTIONS CHAIN TABLE ================= -->
+    <section class="bg-slate-800 rounded-lg overflow-hidden shadow-lg">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-slate-950/60 text-slate-400 text-xs uppercase tracking-wide">
+            <th colspan="2" class="py-2 border-b border-slate-700 text-emerald-400">Calls</th>
+            <th class="py-2 border-b border-slate-700 border-x border-slate-700">Strike</th>
+            <th colspan="2" class="py-2 border-b border-slate-700 text-rose-400">Puts</th>
+          </tr>
+          <tr class="bg-slate-950/40 text-slate-500 text-[11px] uppercase">
+            <th class="py-2 px-3 text-left font-medium">Status</th>
+            <th class="py-2 px-3 text-right font-medium">Intrinsic Value</th>
+            <th class="py-2 px-3 text-center font-medium border-x border-slate-700">Price</th>
+            <th class="py-2 px-3 text-left font-medium">Intrinsic Value</th>
+            <th class="py-2 px-3 text-right font-medium">Status</th>
+          </tr>
+        </thead>
+        <tbody id="chainBody">
+          <!-- rows injected by JS -->
+        </tbody>
+      </table>
+    </section>
+
+    <p class="text-xs text-slate-500 mt-4">
+      Bridge: <code class="text-slate-400">ws://localhost:8765</code> &middot;
+      Run <code class="text-slate-400">python upstox_bridge.py</code> first, then click Connect.
+    </p>
+  </div>
+
+  <script>
+    // ===================== CONFIG / STATE =====================
+    const WS_URL = "ws://localhost:8765";
+
+    // Sensible base prices + strike step per symbol so switching feels realistic.
+    const SYMBOL_CONFIG = {
+      CIPLA:     { base: 1476.80, step: 20 },
+      NIFTY:     { base: 24500.0, step: 50 },
+      BANKNIFTY: { base: 51500.0, step: 100 },
+      RELIANCE:  { base: 2950.0,  step: 20 },
+      TCS:       { base: 3850.0,  step: 50 },
+      INFY:      { base: 1650.0,  step: 20 },
+      HDFCBANK:  { base: 1680.0,  step: 20 },
+      SBIN:      { base: 820.0,   step: 10 },
+    };
+    const DEFAULT_CONFIG = { base: 1000.0, step: 20 };
+
+    const state = {
+      symbol: "CIPLA",
+      price: null,
+      prevPrice: null,
+      step: SYMBOL_CONFIG.CIPLA.step,
+      customStrikes: new Set(),   // user-added strikes
+      ws: null,
+    };
+
+    // ===================== DOM REFS =====================
+    const $ = (id) => document.getElementById(id);
+    const symbolLabel = $("symbolLabel");
+    const priceLabel  = $("priceLabel");
+    const statusDot   = $("statusDot");
+    const statusText  = $("statusText");
+    const connectBtn  = $("connectBtn");
+    const chainBody   = $("chainBody");
+
+    // ===================== STRIKE GENERATION =====================
+    function standardStrikes(base, step, count = 6) {
+      // Round base to nearest step, then produce `count` strikes each side.
+      const atm = Math.round(base / step) * step;
+      const strikes = [];
+      for (let i = -count; i <= count; i++) {
+        strikes.push(atm + i * step);
+      }
+      return strikes;
+    }
+
+    function allStrikes() {
+      const base = state.price ?? SYMBOL_CONFIG[state.symbol]?.base ?? DEFAULT_CONFIG.base;
+      const set = new Set(standardStrikes(base, state.step));
+      state.customStrikes.forEach((s) => set.add(s));
+      return [...set].filter((s) => s > 0).sort((a, b) => a - b);
+    }
+
+    // ===================== RENDER =====================
+    function fmt(n) {
+      return n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function renderChain() {
+      const price = state.price ?? SYMBOL_CONFIG[state.symbol]?.base ?? DEFAULT_CONFIG.base;
+      const strikes = allStrikes();
+
+      chainBody.innerHTML = strikes.map((strike) => {
+        const callIV = Math.max(0, price - strike);
+        const putIV  = Math.max(0, strike - price);
+        const callITM = callIV > 0;
+        const putITM  = putIV > 0;
+
+        const callBg = callITM ? "bg-emerald-900/40" : "";
+        const putBg  = putITM  ? "bg-rose-900/40"    : "";
+
+        const badge = (itm, color) =>
+          `<span class="inline-block px-2 py-0.5 rounded text-[11px] font-semibold ${
+            itm ? `bg-${color}-500/20 text-${color}-300` : "bg-slate-700 text-slate-400"
+          }">${itm ? "ITM" : "OTM"}</span>`;
+
+        const isCustom = state.customStrikes.has(strike);
+
+        return `
+          <tr class="border-b border-slate-700/50 hover:bg-slate-700/20">
+            <td class="py-2 px-3 ${callBg}">${badge(callITM, "emerald")}</td>
+            <td class="py-2 px-3 text-right tabular-nums ${callBg} ${callITM ? "text-emerald-300 font-semibold" : "text-slate-500"}">${fmt(callIV)}</td>
+            <td class="py-2 px-3 text-center font-bold tabular-nums bg-slate-950/40 border-x border-slate-700">
+              ${strike}${isCustom ? '<span class="text-indigo-400 text-[10px] align-super ml-0.5">•</span>' : ""}
+            </td>
+            <td class="py-2 px-3 text-left tabular-nums ${putBg} ${putITM ? "text-rose-300 font-semibold" : "text-slate-500"}">${fmt(putIV)}</td>
+            <td class="py-2 px-3 text-right ${putBg}">${badge(putITM, "rose")}</td>
+          </tr>`;
+      }).join("");
+    }
+
+    // ===================== PRICE UPDATE =====================
+    function updatePrice(newPrice) {
+      state.prevPrice = state.price;
+      state.price = newPrice;
+
+      priceLabel.textContent = fmt(newPrice);
+
+      if (state.prevPrice !== null && newPrice !== state.prevPrice) {
+        const up = newPrice > state.prevPrice;
+        priceLabel.classList.remove("flash-up", "flash-down");
+        void priceLabel.offsetWidth; // restart animation
+        priceLabel.classList.add(up ? "flash-up" : "flash-down");
+      }
+
+      renderChain();
+    }
+
+    // ===================== SYMBOL SWITCH =====================
+    function switchSymbol(rawSymbol) {
+      const symbol = (rawSymbol || "").toUpperCase().trim();
+      if (!symbol) return;
+
+      state.symbol = symbol;
+      const cfg = SYMBOL_CONFIG[symbol] ?? DEFAULT_CONFIG;
+      state.step = cfg.step;
+      state.customStrikes.clear();
+
+      // Reset price to base until the bridge sends live ticks for it.
+      state.price = cfg.base;
+      state.prevPrice = null;
+
+      symbolLabel.textContent = symbol;
+      priceLabel.textContent = fmt(cfg.base);
+      renderChain();
+
+      // Tell the bridge to switch feeds (if connected).
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ action: "subscribe", symbol }));
+      }
+    }
+
+    // ===================== WEBSOCKET =====================
+    function setStatus(kind) {
+      // kind: 'connected' | 'connecting' | 'disconnected'
+      const map = {
+        connected:    ["bg-emerald-500 dot-live", "Live",         "Disconnect"],
+        connecting:   ["bg-amber-500 dot-live",   "Connecting…",  "Connecting…"],
+        disconnected: ["bg-slate-500",            "Disconnected", "Connect to Upstox Bridge"],
+      };
+      const [dotCls, text, btn] = map[kind];
+      statusDot.className = "w-3 h-3 rounded-full " + dotCls;
+      statusText.textContent = text;
+      connectBtn.textContent = btn;
+    }
+
+    function connect() {
+      if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+        // Already connected -> treat click as disconnect.
+        state.ws.close();
+        return;
+      }
+
+      setStatus("connecting");
+      let ws;
+      try {
+        ws = new WebSocket(WS_URL);
+      } catch (e) {
+        setStatus("disconnected");
+        alert("Failed to open WebSocket: " + e.message);
+        return;
+      }
+      state.ws = ws;
+
+      ws.onopen = () => {
+        setStatus("connected");
+        // Announce which symbol we want right away.
+        ws.send(JSON.stringify({ action: "subscribe", symbol: state.symbol }));
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.symbol && data.symbol.toUpperCase() !== state.symbol) {
+            // Bridge confirms a symbol switch.
+            state.symbol = data.symbol.toUpperCase();
+            symbolLabel.textContent = state.symbol;
+          }
+          if (typeof data.price === "number") {
+            updatePrice(data.price);
+          }
+        } catch (_) { /* ignore malformed */ }
+      };
+
+      ws.onclose = () => {
+        setStatus("disconnected");
+        state.ws = null;
+      };
+
+      ws.onerror = () => {
+        setStatus("disconnected");
+      };
+    }
+
+    // ===================== EVENT WIRING =====================
+    connectBtn.addEventListener("click", connect);
+
+    $("searchBtn").addEventListener("click", () => {
+      switchSymbol($("symbolInput").value);
+      $("symbolInput").value = "";
+    });
+    $("symbolInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { switchSymbol($("symbolInput").value); $("symbolInput").value = ""; }
+    });
+
+    function addStrike() {
+      const val = parseFloat($("strikeInput").value);
+      if (!isNaN(val) && val > 0) {
+        state.customStrikes.add(val);
+        renderChain();
+      }
+      $("strikeInput").value = "";
+    }
+    $("addStrikeBtn").addEventListener("click", addStrike);
+    $("strikeInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addStrike(); });
+
+    $("resetBtn").addEventListener("click", () => {
+      state.customStrikes.clear();
+      renderChain();
+    });
+
+    // ===================== INIT =====================
+    switchSymbol("CIPLA");  // sets base price + initial chain
+  </script>
+</body>
+</html>
